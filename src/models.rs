@@ -1,10 +1,7 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Operation type for marker log entries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
     Insert,
@@ -12,14 +9,33 @@ pub enum Operation {
     Delete,
 }
 
+// Custom FromRow implementation for Operation from TEXT
+impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for Operation {
+    fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let text = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+        match text {
+            "insert" => Ok(Operation::Insert),
+            "update" => Ok(Operation::Update),
+            "delete" => Ok(Operation::Delete),
+            _ => Err(format!("Unknown operation: {}", text).into()),
+        }
+    }
+}
+
+impl sqlx::Type<sqlx::Sqlite> for Operation {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <&str as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+}
+
 /// A single entry in the marker log (append-only).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct LogEntry {
     pub id: i64,
     pub globe_id: String,
-    pub uuid: Uuid,
+    pub uuid: String, // UUID stored as TEXT in SQLite
     pub operation: Operation,
-    pub ts: DateTime<Utc>,
+    pub ts: String, // Timestamp stored as TEXT in SQLite
     pub lat: Option<f64>,
     pub lon: Option<f64>,
     pub icon_id: Option<String>,
@@ -29,18 +45,18 @@ pub struct LogEntry {
 /// Current state of a marker (computed from log).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Marker {
-    pub uuid: Uuid,
+    pub uuid: String, // UUID stored as TEXT in SQLite
     pub lat: f64,
     pub lon: f64,
     pub icon_id: String,
     pub label: Option<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: String, // Timestamp stored as TEXT in SQLite
 }
 
 /// Request to create a new marker.
 #[derive(Debug, Deserialize)]
 pub struct CreateMarkerRequest {
-    pub uuid: Option<Uuid>,
+    pub uuid: Option<String>,
     pub globe_id: Option<String>,
     pub lat: f64,
     pub lon: f64,

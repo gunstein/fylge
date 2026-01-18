@@ -22,7 +22,7 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Configuration error: {}", e);
-            eprintln!("Required: DATABASE_URL=postgres://...");
+            eprintln!("Optional: DATABASE_URL (default: sqlite:fylge.db)");
             eprintln!("Optional: LISTEN_ADDR (default: 0.0.0.0:3000)");
             std::process::exit(1);
         }
@@ -30,6 +30,7 @@ async fn main() {
 
     tracing::info!("Starting Fylge server");
     tracing::info!("Listen address: {}", config.listen_addr);
+    tracing::info!("Database: {}", config.database_url);
 
     // Connect to database
     let pool = match db::init_pool(&config.database_url).await {
@@ -51,8 +52,7 @@ async fn main() {
     let state = AppState::new(pool);
 
     // Build router
-    let app = routes::create_router(state)
-        .nest_service("/static", ServeDir::new("static"));
+    let app = routes::create_router(state).nest_service("/static", ServeDir::new("static"));
 
     // Start server
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)

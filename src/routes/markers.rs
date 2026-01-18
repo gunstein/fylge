@@ -15,7 +15,10 @@ pub async fn create_marker(
     State(state): State<AppState>,
     Json(req): Json<CreateMarkerRequest>,
 ) -> Response {
-    let uuid = req.uuid.unwrap_or_else(Uuid::new_v4);
+    let uuid = req
+        .uuid
+        .and_then(|s| Uuid::parse_str(&s).ok())
+        .unwrap_or_else(Uuid::new_v4);
     let globe_id = req.globe_id.as_deref().unwrap_or("default");
 
     // Validate coordinates
@@ -42,7 +45,7 @@ pub async fn create_marker(
     {
         Ok(id) => (
             StatusCode::CREATED,
-            Json(serde_json::json!({ "id": id, "uuid": uuid })),
+            Json(serde_json::json!({ "id": id, "uuid": uuid.to_string() })),
         )
             .into_response(),
         Err(e) => {
@@ -55,9 +58,13 @@ pub async fn create_marker(
 /// PUT /markers/:uuid - Update an existing marker.
 pub async fn update_marker(
     State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
+    Path(uuid_str): Path<String>,
     Json(req): Json<UpdateMarkerRequest>,
 ) -> Response {
+    let uuid = match Uuid::parse_str(&uuid_str) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UUID").into_response(),
+    };
     let globe_id = req.globe_id.as_deref().unwrap_or("default");
 
     // Check if marker exists
@@ -93,7 +100,7 @@ pub async fn update_marker(
     )
     .await
     {
-        Ok(id) => Json(serde_json::json!({ "id": id, "uuid": uuid })).into_response(),
+        Ok(id) => Json(serde_json::json!({ "id": id, "uuid": uuid.to_string() })).into_response(),
         Err(e) => {
             tracing::error!("Failed to update marker: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
@@ -104,8 +111,12 @@ pub async fn update_marker(
 /// DELETE /markers/:uuid - Delete a marker.
 pub async fn delete_marker(
     State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
+    Path(uuid_str): Path<String>,
 ) -> Response {
+    let uuid = match Uuid::parse_str(&uuid_str) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UUID").into_response(),
+    };
     let globe_id = "default"; // Could be passed as query param if needed
 
     // Check if marker exists
@@ -119,7 +130,7 @@ pub async fn delete_marker(
     }
 
     match db::delete_marker(&state.pool, globe_id, uuid).await {
-        Ok(id) => Json(serde_json::json!({ "id": id, "uuid": uuid })).into_response(),
+        Ok(id) => Json(serde_json::json!({ "id": id, "uuid": uuid.to_string() })).into_response(),
         Err(e) => {
             tracing::error!("Failed to delete marker: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()

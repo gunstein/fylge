@@ -1,12 +1,12 @@
 -- Marker log table (append-only)
 CREATE TABLE IF NOT EXISTS marker_log (
-    id BIGSERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     globe_id TEXT NOT NULL DEFAULT 'default',
-    uuid UUID NOT NULL,
+    uuid TEXT NOT NULL,
     operation TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete')),
-    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-    lat DOUBLE PRECISION,
-    lon DOUBLE PRECISION,
+    ts TEXT NOT NULL DEFAULT (datetime('now')),
+    lat REAL,
+    lon REAL,
     icon_id TEXT,
     label TEXT
 );
