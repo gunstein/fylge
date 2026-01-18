@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fylge - Globe Markers</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://unpkg.com/globe.gl"></script>
+</head>
+<body>
+  <div class="container">
+    <div class="sidebar">
+      <h1>Fylge</h1>
+
+      <div class="instructions">
+        Select an icon below, then click on the globe to place a marker.
+      </div>
+
+      <div>
+        <h2>Icons</h2>
+        <div id="icon-palette" class="icon-palette">
+          <!-- Icons loaded dynamically -->
+        </div>
+      </div>
+
+      <div class="marker-list-container">
+        <h2>Markers</h2>
+        <div id="marker-list" class="marker-list">
+          <!-- Markers loaded dynamically -->
+        </div>
+      </div>
+    </div>
+
+    <div class="globe-container">
+      <div id="globe"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

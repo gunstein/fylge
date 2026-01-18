@@ -1,80 +1,116 @@
 # Fylge
 
-A distributed globe marker application with eventual consistency. Place markers on a 3D globe and sync them across multiple nodes.
+A distributed globe marker application with a simple append-only log architecture.
 
 ## Architecture
 
-- **Frontend**: Server-driven with htmx + globe.gl for 3D visualization
-- **Backend**: Rust + Axum + redb
-- **Replication**: CouchDB-inspired append-only event log with Hybrid Logical Clocks
+- **Single Postgres database** as the source of truth
+- **Append-only `marker_log` table** - inserts, updates, and deletes are all log entries
+- **Stateless app servers** - can run multiple instances behind a load balancer
+- **HA via Postgres replication** - no custom sync logic needed
 
-### Crate Structure
+## Requirements
 
-```
-fylge/
-├── crates/
-│   ├── fylge-core/          # Domain models, traits, validation
-│   ├── fylge-db/            # redb storage implementation
-│   ├── fylge-replication/   # Pull-based sync, conflict resolution
-│   └── fylge-server/        # Axum HTTP server
-```
+- Rust 1.70+
+- PostgreSQL 14+
 
-## Quick Start
+## Setup
 
+1. Create a PostgreSQL database:
 ```bash
-# Run the server
-FYLGE_NODE_ID=1 cargo run -p fylge-server
-
-# Open in browser
-open http://localhost:3000
+createdb fylge
 ```
 
-## Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FYLGE_NODE_ID` | (required) | Unique node ID (u64) |
-| `FYLGE_LISTEN_ADDR` | `0.0.0.0:3000` | Listen address |
-| `FYLGE_DB_PATH` | `./fylge.redb` | Database file path |
-| `FYLGE_PEERS` | (empty) | Comma-separated peer URLs |
-| `FYLGE_PULL_INTERVAL_SECS` | `5` | Sync interval |
-
-## Multi-Node Setup
-
+2. Set environment variables:
 ```bash
-# Terminal 1 - Node 1
-FYLGE_NODE_ID=1 FYLGE_LISTEN_ADDR=0.0.0.0:3001 FYLGE_DB_PATH=./node1.redb cargo run -p fylge-server
-
-# Terminal 2 - Node 2
-FYLGE_NODE_ID=2 FYLGE_LISTEN_ADDR=0.0.0.0:3002 FYLGE_DB_PATH=./node2.redb FYLGE_PEERS=http://localhost:3001 cargo run -p fylge-server
+export DATABASE_URL=postgres://user:pass@localhost/fylge
+export LISTEN_ADDR=0.0.0.0:3000  # optional, default shown
 ```
 
-## Usage
-
-1. Select an icon from the palette on the left
-2. Click anywhere on the globe to place a marker
-3. Markers sync automatically between nodes
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Main page with globe |
-| GET | `/api/markers` | Get all markers (JSON) |
-| GET | `/api/icons` | Get available icons (JSON) |
-| POST | `/markers` | Create marker |
-| DELETE | `/markers/{id}` | Delete marker |
-| GET | `/health` | Health check |
-
-## Testing
-
+3. Run the server:
 ```bash
-cargo test
+cargo run
 ```
 
-## Design Principles
+The server will automatically run migrations on startup.
 
-- **Eventual consistency**: Split-brain is allowed; nodes converge when reconnected
-- **Append-only**: All writes are events; no updates or deletes at the storage level
-- **Last-write-wins**: Conflicts resolved deterministically using Hybrid Logical Clocks
-- **Simple**: Minimal dependencies, easy to understand and modify
+## API
+
+### Write Operations
+
+**Create marker:**
+```bash
+POST /markers
+Content-Type: application/json
+
+{
+  "lat": 59.9,
+  "lon": 10.7,
+  "icon_id": "ship",
+  "label": "Oslo"
+}
+```
+
+**Update marker:**
+```bash
+PUT /markers/{uuid}
+Content-Type: application/json
+
+{
+  "lat": 60.0,
+  "lon": 11.0
+}
+```
+
+**Delete marker:**
+```bash
+DELETE /markers/{uuid}
+```
+
+### Read Operations
+
+**Get current markers (computed state):**
+```bash
+GET /api/markers?globe_id=default
+```
+
+**Get log entries (for sync/replay):**
+```bash
+GET /api/log?globe_id=default&after_id=0&limit=100
+```
+
+**Get available icons:**
+```bash
+GET /api/icons
+```
+
+## Data Model
+
+All changes are stored in a single append-only log table:
+
+```sql
+CREATE TABLE marker_log (
+    id BIGSERIAL PRIMARY KEY,       -- monotonic cursor for sync
+    globe_id TEXT NOT NULL,         -- partition key
+    uuid UUID NOT NULL,             -- marker identity
+    operation TEXT NOT NULL,        -- 'insert', 'update', 'delete'
+    ts TIMESTAMPTZ DEFAULT now(),   -- timestamp
+    lat DOUBLE PRECISION,           -- coordinates (null for delete)
+    lon DOUBLE PRECISION,
+    icon_id TEXT,
+    label TEXT
+);
+```
+
+**Key properties:**
+- Nothing is ever deleted from the log
+- Current state = latest non-deleted entry per UUID
+- Sync = `SELECT * FROM marker_log WHERE id > last_seen_id`
+
+## Frontend
+
+Open http://localhost:3000 to see the globe interface.
+
+- Select an icon from the palette
+- Click on the globe to place a marker
+- Click "Delete" to remove markers

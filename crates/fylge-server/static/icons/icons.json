@@ -1,5 +1,0 @@
-[
-  { "id": "marker", "name": "Marker", "filename": "marker.png" },
-  { "id": "ship", "name": "Ship", "filename": "ship.png" },
-  { "id": "plane", "name": "Plane", "filename": "plane.png" }
-]

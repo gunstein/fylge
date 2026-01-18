@@ -1,0 +1,5 @@
+[
+  { "id": "marker", "name": "Marker", "filename": "marker.svg" },
+  { "id": "ship", "name": "Ship", "filename": "ship.svg" },
+  { "id": "plane", "name": "Plane", "filename": "plane.svg" }
+]
