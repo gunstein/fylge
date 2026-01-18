@@ -1,0 +1,17 @@
+[package]
+name = "fylge-replication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fylge-core = { path = "../fylge-core" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["time", "rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+fylge-core = { path = "../fylge-core", features = ["test-utils"] }
