@@ -1,116 +1,167 @@
 # Fylge
 
-A distributed globe marker application with a simple append-only log architecture.
+A globe marker application with a simple append-only log architecture. Place markers on a 3D globe - they remain visible for 24 hours.
 
 ## Architecture
 
-- **Single Postgres database** as the source of truth
-- **Append-only `marker_log` table** - inserts, updates, and deletes are all log entries
-- **Stateless app servers** - can run multiple instances behind a load balancer
-- **HA via Postgres replication** - no custom sync logic needed
+- **SQLite database** with WAL mode for concurrent access
+- **Append-only `marker_log` table** - only inserts, no updates or deletes
+- **24-hour TTL** - markers automatically expire after 24 hours
+- **Idempotent creates** - frontend generates UUID, duplicate inserts are no-ops
 
 ## Requirements
 
 - Rust 1.70+
-- PostgreSQL 14+
+- Node.js 18+ (for frontend development only)
 
-## Setup
+## Quick Start
 
-1. Create a PostgreSQL database:
 ```bash
-createdb fylge
-```
-
-2. Set environment variables:
-```bash
-export DATABASE_URL=postgres://user:pass@localhost/fylge
-export LISTEN_ADDR=0.0.0.0:3000  # optional, default shown
-```
-
-3. Run the server:
-```bash
+# Run the server (creates fylge.db automatically)
 cargo run
+
+# Open in browser
+open http://localhost:3000
 ```
 
-The server will automatically run migrations on startup.
+## Configuration
+
+Environment variables (all optional):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | `sqlite://fylge.db` | SQLite database path |
+| `LISTEN_ADDR` | `0.0.0.0:3000` | Server listen address |
 
 ## API
 
-### Write Operations
+### Create Marker
 
-**Create marker:**
 ```bash
 POST /markers
 Content-Type: application/json
 
 {
-  "lat": 59.9,
-  "lon": 10.7,
-  "icon_id": "ship",
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "lat": 59.91,
+  "lon": 10.75,
+  "icon_id": "marker",
   "label": "Oslo"
 }
 ```
 
-**Update marker:**
-```bash
-PUT /markers/{uuid}
-Content-Type: application/json
-
+Response:
+```json
 {
-  "lat": 60.0,
-  "lon": 11.0
+  "status": "created",
+  "marker": {
+    "id": 1,
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "ts": "2024-01-19T12:00:00.000Z",
+    "lat": 59.91,
+    "lon": 10.75,
+    "icon_id": "marker",
+    "label": "Oslo"
+  }
 }
 ```
 
-**Delete marker:**
+If the same UUID is sent again, returns `"status": "exists"` with the existing marker.
+
+### Get Markers (Last 24 Hours)
+
 ```bash
-DELETE /markers/{uuid}
+GET /api/markers
 ```
 
-### Read Operations
-
-**Get current markers (computed state):**
-```bash
-GET /api/markers?globe_id=default
+Response:
+```json
+{
+  "window_hours": 24,
+  "server_time": "2024-01-19T12:00:00.000Z",
+  "max_id": 42,
+  "markers": [...]
+}
 ```
 
-**Get log entries (for sync/replay):**
+### Get Markers at Specific Time
+
 ```bash
-GET /api/log?globe_id=default&after_id=0&limit=100
+GET /api/markers_at?at=2024-01-19T10:00:00.000Z
 ```
 
-**Get available icons:**
+Returns markers visible at that point in time (24h window ending at `at`).
+
+### Get Log (for Polling)
+
+```bash
+GET /api/log?after_id=0&limit=100
+```
+
+Response:
+```json
+{
+  "after_id": 0,
+  "limit": 100,
+  "server_time": "2024-01-19T12:00:00.000Z",
+  "max_id": 42,
+  "has_more": false,
+  "entries": [...]
+}
+```
+
+### Get Icons
+
 ```bash
 GET /api/icons
 ```
 
 ## Data Model
 
-All changes are stored in a single append-only log table:
-
 ```sql
 CREATE TABLE marker_log (
-    id BIGSERIAL PRIMARY KEY,       -- monotonic cursor for sync
-    globe_id TEXT NOT NULL,         -- partition key
-    uuid UUID NOT NULL,             -- marker identity
-    operation TEXT NOT NULL,        -- 'insert', 'update', 'delete'
-    ts TIMESTAMPTZ DEFAULT now(),   -- timestamp
-    lat DOUBLE PRECISION,           -- coordinates (null for delete)
-    lon DOUBLE PRECISION,
-    icon_id TEXT,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL UNIQUE,
+    ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    icon_id TEXT NOT NULL,
     label TEXT
 );
 ```
 
-**Key properties:**
-- Nothing is ever deleted from the log
-- Current state = latest non-deleted entry per UUID
-- Sync = `SELECT * FROM marker_log WHERE id > last_seen_id`
+## Frontend Development
 
-## Frontend
+The backend serves a standalone HTML file at `/` that works without a build step.
 
-Open http://localhost:3000 to see the globe interface.
+For development with hot reload:
 
-- Select an icon from the palette
-- Click on the globe to place a marker
-- Click "Delete" to remove markers
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+This starts Vite on port 5173 with proxy to the backend.
+
+To build for production:
+
+```bash
+cd frontend
+npm run build
+```
+
+Output goes to `static/dist/`.
+
+## Icons
+
+Icons are configured in `static/icons/icons.json`:
+
+```json
+[
+  { "id": "marker", "name": "Marker", "url": "/static/icons/marker.svg" },
+  { "id": "ship", "name": "Ship", "url": "/static/icons/ship.svg" }
+]
+```
+
+Add new icons by placing SVG files in `static/icons/` and updating the JSON file.
