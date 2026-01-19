@@ -1,14 +1,14 @@
 // API Types for Fylge
 
 export type UUID = string;
-export type IsoTime = string;
+export type EpochMs = number; // Milliseconds since Unix epoch
 export type IconId = string;
 
 // A marker in the log
 export interface Marker {
   id: number;
   uuid: UUID;
-  ts: IsoTime;
+  ts_epoch_ms: EpochMs;
   lat: number;
   lon: number;
   icon_id: IconId;
@@ -26,21 +26,21 @@ export interface CreateMarkerRequest {
 
 // Response for creating a marker
 export interface CreateMarkerResponse {
-  status: 'created' | 'exists';
+  status: "created" | "exists";
   marker: Marker;
 }
 
 // Response for GET /api/markers
 export interface GetMarkersResponse {
   window_hours: number;
-  server_time: IsoTime;
+  server_time_ms: EpochMs;
   max_id: number;
   markers: Marker[];
 }
 
 // Response for GET /api/markers_at
 export interface GetMarkersAtResponse {
-  at: IsoTime;
+  at_epoch_ms: EpochMs;
   window_hours: number;
   markers: Marker[];
 }
@@ -49,7 +49,7 @@ export interface GetMarkersAtResponse {
 export interface GetLogResponse {
   after_id: number;
   limit: number;
-  server_time: IsoTime;
+  server_time_ms: EpochMs;
   max_id: number;
   has_more: boolean;
   entries: Marker[];

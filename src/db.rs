@@ -1,8 +1,17 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::models::Marker;
+
+/// Get current time as milliseconds since Unix epoch.
+pub fn current_epoch_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_millis() as i64
+}
 
 /// Initialize database connection pool with recommended pragmas.
 pub async fn init_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
@@ -36,15 +45,18 @@ pub async fn insert_marker(
     icon_id: &str,
     label: Option<&str>,
 ) -> Result<(Marker, bool), sqlx::Error> {
+    let ts_epoch_ms = current_epoch_ms();
+
     // Try to insert
     let result = sqlx::query(
         r#"
-        INSERT INTO marker_log (uuid, lat, lon, icon_id, label)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO marker_log (uuid, ts_epoch_ms, lat, lon, icon_id, label)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(uuid) DO NOTHING
         "#,
     )
     .bind(uuid)
+    .bind(ts_epoch_ms)
     .bind(lat)
     .bind(lon)
     .bind(icon_id)
@@ -56,7 +68,7 @@ pub async fn insert_marker(
 
     // Fetch the marker (either just created or existing)
     let marker = sqlx::query_as::<_, Marker>(
-        "SELECT id, uuid, ts, lat, lon, icon_id, label FROM marker_log WHERE uuid = ?",
+        "SELECT id, uuid, ts_epoch_ms, lat, lon, icon_id, label FROM marker_log WHERE uuid = ?",
     )
     .bind(uuid)
     .fetch_one(pool)
@@ -65,16 +77,61 @@ pub async fn insert_marker(
     Ok((marker, created))
 }
 
-/// Get markers from the last 24 hours.
-pub async fn get_markers_last_24h(pool: &SqlitePool) -> Result<(Vec<Marker>, i64), sqlx::Error> {
-    let markers = sqlx::query_as::<_, Marker>(
+/// Insert a marker with explicit timestamp (for testing).
+#[cfg(test)]
+pub async fn insert_marker_with_ts(
+    pool: &SqlitePool,
+    uuid: &str,
+    ts_epoch_ms: i64,
+    lat: f64,
+    lon: f64,
+    icon_id: &str,
+    label: Option<&str>,
+) -> Result<(Marker, bool), sqlx::Error> {
+    let result = sqlx::query(
         r#"
-        SELECT id, uuid, ts, lat, lon, icon_id, label
-        FROM marker_log
-        WHERE ts >= datetime('now', '-24 hours')
-        ORDER BY ts ASC
+        INSERT INTO marker_log (uuid, ts_epoch_ms, lat, lon, icon_id, label)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(uuid) DO NOTHING
         "#,
     )
+    .bind(uuid)
+    .bind(ts_epoch_ms)
+    .bind(lat)
+    .bind(lon)
+    .bind(icon_id)
+    .bind(label)
+    .execute(pool)
+    .await?;
+
+    let created = result.rows_affected() > 0;
+
+    let marker = sqlx::query_as::<_, Marker>(
+        "SELECT id, uuid, ts_epoch_ms, lat, lon, icon_id, label FROM marker_log WHERE uuid = ?",
+    )
+    .bind(uuid)
+    .fetch_one(pool)
+    .await?;
+
+    Ok((marker, created))
+}
+
+/// 24 hours in milliseconds.
+const TWENTY_FOUR_HOURS_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Get markers from the last 24 hours.
+pub async fn get_markers_last_24h(pool: &SqlitePool) -> Result<(Vec<Marker>, i64), sqlx::Error> {
+    let cutoff = current_epoch_ms() - TWENTY_FOUR_HOURS_MS;
+
+    let markers = sqlx::query_as::<_, Marker>(
+        r#"
+        SELECT id, uuid, ts_epoch_ms, lat, lon, icon_id, label
+        FROM marker_log
+        WHERE ts_epoch_ms >= ?
+        ORDER BY ts_epoch_ms ASC
+        "#,
+    )
+    .bind(cutoff)
     .fetch_all(pool)
     .await?;
 
@@ -87,23 +144,32 @@ pub async fn get_markers_last_24h(pool: &SqlitePool) -> Result<(Vec<Marker>, i64
 }
 
 /// Get markers visible at a specific point in time (24h window ending at that time).
-pub async fn get_markers_at(pool: &SqlitePool, at: &str) -> Result<Vec<Marker>, sqlx::Error> {
+/// `at_epoch_ms` is the end of the window in milliseconds since Unix epoch.
+pub async fn get_markers_at(
+    pool: &SqlitePool,
+    at_epoch_ms: i64,
+) -> Result<Vec<Marker>, sqlx::Error> {
+    let start = at_epoch_ms - TWENTY_FOUR_HOURS_MS;
+
     let markers = sqlx::query_as::<_, Marker>(
         r#"
-        SELECT id, uuid, ts, lat, lon, icon_id, label
+        SELECT id, uuid, ts_epoch_ms, lat, lon, icon_id, label
         FROM marker_log
-        WHERE ts <= ?
-          AND ts >= datetime(?, '-24 hours')
-        ORDER BY ts ASC
+        WHERE ts_epoch_ms <= ?
+          AND ts_epoch_ms >= ?
+        ORDER BY ts_epoch_ms ASC
         "#,
     )
-    .bind(at)
-    .bind(at)
+    .bind(at_epoch_ms)
+    .bind(start)
     .fetch_all(pool)
     .await?;
 
     Ok(markers)
 }
+
+/// Maximum allowed limit for pagination.
+pub const MAX_LIMIT: i64 = 1000;
 
 /// Get log entries after a given id (for polling/sync).
 pub async fn get_log_after(
@@ -111,9 +177,12 @@ pub async fn get_log_after(
     after_id: i64,
     limit: i64,
 ) -> Result<(Vec<Marker>, i64, bool), sqlx::Error> {
+    // Clamp limit to MAX_LIMIT
+    let limit = limit.min(MAX_LIMIT);
+
     let entries = sqlx::query_as::<_, Marker>(
         r#"
-        SELECT id, uuid, ts, lat, lon, icon_id, label
+        SELECT id, uuid, ts_epoch_ms, lat, lon, icon_id, label
         FROM marker_log
         WHERE id > ?
         ORDER BY id ASC
@@ -133,12 +202,9 @@ pub async fn get_log_after(
     Ok((entries, max_id, has_more))
 }
 
-/// Get current server time in ISO format.
-pub async fn get_server_time(pool: &SqlitePool) -> Result<String, sqlx::Error> {
-    let time: String = sqlx::query_scalar("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
-        .fetch_one(pool)
-        .await?;
-    Ok(time)
+/// Get current server time as epoch milliseconds.
+pub fn get_server_time_ms() -> i64 {
+    current_epoch_ms()
 }
 
 #[cfg(test)]
@@ -174,6 +240,7 @@ mod tests {
         assert_eq!(marker.icon_id, "marker");
         assert_eq!(marker.label, Some("Oslo".to_string()));
         assert_eq!(marker.id, 1);
+        assert!(marker.ts_epoch_ms > 0);
     }
 
     #[tokio::test]
@@ -262,6 +329,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_markers_last_24h_excludes_old() {
+        let pool = setup_test_db().await;
+
+        let now = current_epoch_ms();
+        let old_time = now - (25 * 60 * 60 * 1000); // 25 hours ago
+
+        // Insert an old marker
+        insert_marker_with_ts(&pool, "uuid-old", old_time, 59.91, 10.75, "marker", None)
+            .await
+            .unwrap();
+
+        // Insert a recent marker
+        insert_marker(&pool, "uuid-new", 60.39, 5.32, "ship", None)
+            .await
+            .unwrap();
+
+        let (markers, _) = get_markers_last_24h(&pool).await.unwrap();
+
+        // Only the new marker should be included
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].uuid, "uuid-new");
+    }
+
+    #[tokio::test]
     async fn test_get_log_after_empty() {
         let pool = setup_test_db().await;
 
@@ -346,33 +437,138 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_server_time() {
+    async fn test_get_log_respects_max_limit() {
         let pool = setup_test_db().await;
 
-        let time = get_server_time(&pool).await.unwrap();
+        // Insert markers
+        for i in 1..=5 {
+            insert_marker(
+                &pool,
+                &format!("uuid-{}", i),
+                59.0 + i as f64,
+                10.0,
+                "marker",
+                None,
+            )
+            .await
+            .unwrap();
+        }
 
-        // Should be in ISO format
-        assert!(time.contains("T"));
-        assert!(time.ends_with("Z"));
-        // Should be parseable
-        assert!(time.len() > 20);
+        // Request with very high limit - should be clamped
+        let (entries, _, _) = get_log_after(&pool, 0, 100000).await.unwrap();
+        assert_eq!(entries.len(), 5); // All 5 markers, not capped because we only have 5
     }
 
     #[tokio::test]
     async fn test_get_markers_at() {
         let pool = setup_test_db().await;
 
-        // Insert a marker
-        insert_marker(&pool, "uuid-1", 59.91, 10.75, "marker", Some("Oslo"))
+        let now = current_epoch_ms();
+        let twelve_hours_ago = now - (12 * 60 * 60 * 1000);
+        let thirty_hours_ago = now - (30 * 60 * 60 * 1000);
+
+        // Insert markers at different times
+        insert_marker_with_ts(
+            &pool,
+            "uuid-old",
+            thirty_hours_ago,
+            59.91,
+            10.75,
+            "marker",
+            None,
+        )
+        .await
+        .unwrap();
+        insert_marker_with_ts(
+            &pool,
+            "uuid-mid",
+            twelve_hours_ago,
+            60.39,
+            5.32,
+            "ship",
+            None,
+        )
+        .await
+        .unwrap();
+        insert_marker_with_ts(&pool, "uuid-new", now, 63.43, 10.39, "plane", None)
             .await
             .unwrap();
 
-        // Get current server time
-        let now = get_server_time(&pool).await.unwrap();
+        // Get markers at current time (last 24h) - should exclude uuid-old (30h ago)
+        let markers = get_markers_at(&pool, now).await.unwrap();
+        assert_eq!(markers.len(), 2); // uuid-mid and uuid-new
 
-        // Get markers at current time (should include the marker)
-        let markers = get_markers_at(&pool, &now).await.unwrap();
-        assert_eq!(markers.len(), 1);
-        assert_eq!(markers[0].uuid, "uuid-1");
+        // Get markers at 12 hours ago - window is (36h ago, 12h ago]
+        // uuid-old (30h ago) is within this window
+        // uuid-mid (12h ago) is within this window
+        // uuid-new (now) is NOT within this window (it's in the future)
+        let markers = get_markers_at(&pool, twelve_hours_ago).await.unwrap();
+        assert_eq!(markers.len(), 2); // uuid-old and uuid-mid
+
+        // Get markers at 25 hours ago - window is (49h ago, 25h ago]
+        // uuid-old (30h ago) IS within this window (49 > 30 > 25)
+        // uuid-mid (12h ago) is NOT within this window (it's in the future relative to 25h ago)
+        let twenty_five_hours_ago = now - (25 * 60 * 60 * 1000);
+        let markers = get_markers_at(&pool, twenty_five_hours_ago).await.unwrap();
+        assert_eq!(markers.len(), 1); // just uuid-old
+        assert_eq!(markers[0].uuid, "uuid-old");
+    }
+
+    #[tokio::test]
+    async fn test_db_check_constraints() {
+        let pool = setup_test_db().await;
+
+        // Invalid latitude should fail
+        let result = sqlx::query(
+            "INSERT INTO marker_log (uuid, ts_epoch_ms, lat, lon, icon_id) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("test-uuid-1")
+        .bind(current_epoch_ms())
+        .bind(91.0) // Invalid: > 90
+        .bind(10.0)
+        .bind("marker")
+        .execute(&pool)
+        .await;
+        assert!(result.is_err());
+
+        // Invalid longitude should fail
+        let result = sqlx::query(
+            "INSERT INTO marker_log (uuid, ts_epoch_ms, lat, lon, icon_id) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("test-uuid-2")
+        .bind(current_epoch_ms())
+        .bind(59.0)
+        .bind(181.0) // Invalid: > 180
+        .bind("marker")
+        .execute(&pool)
+        .await;
+        assert!(result.is_err());
+
+        // Empty icon_id should fail
+        let result = sqlx::query(
+            "INSERT INTO marker_log (uuid, ts_epoch_ms, lat, lon, icon_id) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("test-uuid-3")
+        .bind(current_epoch_ms())
+        .bind(59.0)
+        .bind(10.0)
+        .bind("") // Invalid: empty
+        .execute(&pool)
+        .await;
+        assert!(result.is_err());
+
+        // Label too long should fail
+        let result = sqlx::query(
+            "INSERT INTO marker_log (uuid, ts_epoch_ms, lat, lon, icon_id, label) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("test-uuid-4")
+        .bind(current_epoch_ms())
+        .bind(59.0)
+        .bind(10.0)
+        .bind("marker")
+        .bind("a".repeat(257)) // Invalid: > 256
+        .execute(&pool)
+        .await;
+        assert!(result.is_err());
     }
 }

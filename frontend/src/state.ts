@@ -1,8 +1,8 @@
 // Application state management
 
-import type { AppState, Marker, Icon, UUID } from './types';
+import type { AppState, Marker, Icon, UUID } from "./types";
 
-const STORAGE_KEY = 'fylge_state';
+const STORAGE_KEY = "fylge_state";
 
 export function createState(): AppState {
   return {
@@ -39,13 +39,11 @@ export function addMarker(state: AppState, marker: Marker): void {
 }
 
 export function removeExpiredMarkers(state: AppState): UUID[] {
-  const now = new Date();
-  const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
   const removed: UUID[] = [];
 
   for (const [uuid, marker] of state.markersByUuid) {
-    const markerTime = new Date(marker.ts);
-    if (markerTime < cutoff) {
+    if (marker.ts_epoch_ms < cutoffMs) {
       state.markersByUuid.delete(uuid);
       removed.push(uuid);
     }

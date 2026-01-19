@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Validation error type.
 #[derive(Debug, Clone, PartialEq)]
@@ -8,7 +9,10 @@ pub enum ValidationError {
     InvalidLongitude(f64),
     EmptyIconId,
     IconIdTooLong(usize),
+    IconIdNotFound(String),
     LabelTooLong(usize),
+    InvalidLimit(i64),
+    InvalidTimestamp(String),
 }
 
 impl std::fmt::Display for ValidationError {
@@ -29,8 +33,17 @@ impl std::fmt::Display for ValidationError {
             ValidationError::IconIdTooLong(len) => {
                 write!(f, "icon_id too long: {} chars (max 64)", len)
             }
+            ValidationError::IconIdNotFound(id) => {
+                write!(f, "icon_id '{}' not found in available icons", id)
+            }
             ValidationError::LabelTooLong(len) => {
                 write!(f, "label too long: {} chars (max 256)", len)
+            }
+            ValidationError::InvalidLimit(limit) => {
+                write!(f, "Invalid limit: {} (must be between 1 and 1000)", limit)
+            }
+            ValidationError::InvalidTimestamp(s) => {
+                write!(f, "Invalid timestamp: {} (must be epoch milliseconds)", s)
             }
         }
     }
@@ -43,7 +56,7 @@ impl std::error::Error for ValidationError {}
 pub struct Marker {
     pub id: i64,
     pub uuid: String,
-    pub ts: String,
+    pub ts_epoch_ms: i64,
     pub lat: f64,
     pub lon: f64,
     pub icon_id: String,
@@ -52,6 +65,7 @@ pub struct Marker {
 
 /// Request to create a new marker.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CreateMarkerRequest {
     pub uuid: String,
     pub lat: f64,
@@ -61,7 +75,7 @@ pub struct CreateMarkerRequest {
 }
 
 impl CreateMarkerRequest {
-    /// Validate the request and return a list of validation errors.
+    /// Validate the request against basic rules.
     pub fn validate(&self) -> Result<(), ValidationError> {
         // Validate UUID format
         if uuid::Uuid::parse_str(&self.uuid).is_err() {
@@ -95,6 +109,20 @@ impl CreateMarkerRequest {
 
         Ok(())
     }
+
+    /// Validate including checking icon_id against available icons.
+    pub fn validate_with_icons(
+        &self,
+        valid_icon_ids: &HashSet<String>,
+    ) -> Result<(), ValidationError> {
+        self.validate()?;
+
+        if !valid_icon_ids.contains(&self.icon_id) {
+            return Err(ValidationError::IconIdNotFound(self.icon_id.clone()));
+        }
+
+        Ok(())
+    }
 }
 
 /// Response for creating a marker.
@@ -108,7 +136,7 @@ pub struct CreateMarkerResponse {
 #[derive(Debug, Serialize)]
 pub struct GetMarkersResponse {
     pub window_hours: u32,
-    pub server_time: String,
+    pub server_time_ms: i64,
     pub max_id: i64,
     pub markers: Vec<Marker>,
 }
@@ -116,19 +144,39 @@ pub struct GetMarkersResponse {
 /// Response for getting markers at a specific time.
 #[derive(Debug, Serialize)]
 pub struct GetMarkersAtResponse {
-    pub at: String,
+    pub at_epoch_ms: i64,
     pub window_hours: u32,
     pub markers: Vec<Marker>,
 }
 
 /// Query parameters for markers_at endpoint.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarkersAtQuery {
-    pub at: String,
+    pub at: i64, // epoch milliseconds
+}
+
+impl MarkersAtQuery {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        // Basic sanity check: timestamp should be positive and reasonable
+        if self.at <= 0 {
+            return Err(ValidationError::InvalidTimestamp(self.at.to_string()));
+        }
+        // Don't allow timestamps too far in the future (more than 1 day)
+        let max_future = crate::db::current_epoch_ms() + (24 * 60 * 60 * 1000);
+        if self.at > max_future {
+            return Err(ValidationError::InvalidTimestamp(format!(
+                "{} (too far in the future)",
+                self.at
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Query parameters for log endpoint.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogQuery {
     #[serde(default)]
     pub after_id: i64,
@@ -140,12 +188,24 @@ fn default_limit() -> i64 {
     100
 }
 
+impl LogQuery {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.after_id < 0 {
+            return Err(ValidationError::InvalidLimit(self.after_id));
+        }
+        if self.limit < 1 || self.limit > 1000 {
+            return Err(ValidationError::InvalidLimit(self.limit));
+        }
+        Ok(())
+    }
+}
+
 /// Response for log endpoint.
 #[derive(Debug, Serialize)]
 pub struct GetLogResponse {
     pub after_id: i64,
     pub limit: i64,
-    pub server_time: String,
+    pub server_time_ms: i64,
     pub max_id: i64,
     pub has_more: bool,
     pub entries: Vec<Marker>,
@@ -163,6 +223,44 @@ pub struct Icon {
 #[derive(Debug, Serialize)]
 pub struct GetIconsResponse {
     pub icons: Vec<Icon>,
+}
+
+/// API error response (consistent JSON format).
+#[derive(Debug, Serialize)]
+pub struct ApiError {
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+impl ApiError {
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            field: None,
+        }
+    }
+
+    pub fn with_field(error: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            field: Some(field.into()),
+        }
+    }
+
+    pub fn from_validation_error(e: &ValidationError) -> Self {
+        match e {
+            ValidationError::InvalidUuid(_) => Self::with_field(e.to_string(), "uuid"),
+            ValidationError::InvalidLatitude(_) => Self::with_field(e.to_string(), "lat"),
+            ValidationError::InvalidLongitude(_) => Self::with_field(e.to_string(), "lon"),
+            ValidationError::EmptyIconId
+            | ValidationError::IconIdTooLong(_)
+            | ValidationError::IconIdNotFound(_) => Self::with_field(e.to_string(), "icon_id"),
+            ValidationError::LabelTooLong(_) => Self::with_field(e.to_string(), "label"),
+            ValidationError::InvalidLimit(_) => Self::with_field(e.to_string(), "limit"),
+            ValidationError::InvalidTimestamp(_) => Self::with_field(e.to_string(), "at"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -324,11 +422,30 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_with_icons() {
+        let req = valid_request();
+        let mut valid_icons = HashSet::new();
+        valid_icons.insert("marker".to_string());
+        valid_icons.insert("ship".to_string());
+
+        assert!(req.validate_with_icons(&valid_icons).is_ok());
+
+        let req_invalid = CreateMarkerRequest {
+            icon_id: "unknown".to_string(),
+            ..valid_request()
+        };
+        assert_eq!(
+            req_invalid.validate_with_icons(&valid_icons),
+            Err(ValidationError::IconIdNotFound("unknown".to_string()))
+        );
+    }
+
+    #[test]
     fn test_marker_serialization() {
         let marker = Marker {
             id: 1,
             uuid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-            ts: "2024-01-19T12:00:00.000Z".to_string(),
+            ts_epoch_ms: 1705665600000,
             lat: 59.91,
             lon: 10.75,
             icon_id: "marker".to_string(),
@@ -338,6 +455,7 @@ mod tests {
         let json = serde_json::to_string(&marker).unwrap();
         assert!(json.contains("\"id\":1"));
         assert!(json.contains("\"uuid\":\"550e8400-e29b-41d4-a716-446655440000\""));
+        assert!(json.contains("\"ts_epoch_ms\":1705665600000"));
         assert!(json.contains("\"lat\":59.91"));
         assert!(json.contains("\"label\":\"Oslo\""));
     }
@@ -347,7 +465,7 @@ mod tests {
         let json = r#"{
             "id": 1,
             "uuid": "550e8400-e29b-41d4-a716-446655440000",
-            "ts": "2024-01-19T12:00:00.000Z",
+            "ts_epoch_ms": 1705665600000,
             "lat": 59.91,
             "lon": 10.75,
             "icon_id": "marker",
@@ -356,6 +474,7 @@ mod tests {
 
         let marker: Marker = serde_json::from_str(json).unwrap();
         assert_eq!(marker.id, 1);
+        assert_eq!(marker.ts_epoch_ms, 1705665600000);
         assert_eq!(marker.lat, 59.91);
         assert_eq!(marker.label, Some("Oslo".to_string()));
     }
@@ -377,6 +496,27 @@ mod tests {
     }
 
     #[test]
+    fn test_log_query_validation() {
+        let valid = LogQuery {
+            after_id: 0,
+            limit: 100,
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid_limit_low = LogQuery {
+            after_id: 0,
+            limit: 0,
+        };
+        assert!(invalid_limit_low.validate().is_err());
+
+        let invalid_limit_high = LogQuery {
+            after_id: 0,
+            limit: 1001,
+        };
+        assert!(invalid_limit_high.validate().is_err());
+    }
+
+    #[test]
     fn test_icon_serialization() {
         let icon = Icon {
             id: "ship".to_string(),
@@ -388,5 +528,26 @@ mod tests {
         assert!(json.contains("\"id\":\"ship\""));
         assert!(json.contains("\"name\":\"Ship\""));
         assert!(json.contains("\"url\":\"/static/icons/ship.svg\""));
+    }
+
+    #[test]
+    fn test_deny_unknown_fields() {
+        // This should fail because "unknown_field" is not expected
+        let json = r#"{"uuid": "550e8400-e29b-41d4-a716-446655440000", "lat": 59.91, "lon": 10.75, "icon_id": "marker", "unknown_field": "value"}"#;
+        let result: Result<CreateMarkerRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_api_error_serialization() {
+        let err = ApiError::new("Something went wrong");
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"error\":\"Something went wrong\""));
+        assert!(!json.contains("field")); // field should be omitted when None
+
+        let err_with_field = ApiError::with_field("Invalid value", "lat");
+        let json = serde_json::to_string(&err_with_field).unwrap();
+        assert!(json.contains("\"error\":\"Invalid value\""));
+        assert!(json.contains("\"field\":\"lat\""));
     }
 }

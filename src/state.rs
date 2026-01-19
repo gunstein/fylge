@@ -1,4 +1,6 @@
 use sqlx::SqlitePool;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::models::Icon;
 
@@ -6,11 +8,17 @@ use crate::models::Icon;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
-    pub icons: Vec<Icon>,
+    pub icons: Arc<Vec<Icon>>,
+    pub icon_ids: Arc<HashSet<String>>,
 }
 
 impl AppState {
     pub fn new(pool: SqlitePool, icons: Vec<Icon>) -> Self {
-        Self { pool, icons }
+        let icon_ids: HashSet<String> = icons.iter().map(|i| i.id.clone()).collect();
+        Self {
+            pool,
+            icons: Arc::new(icons),
+            icon_ids: Arc::new(icon_ids),
+        }
     }
 }

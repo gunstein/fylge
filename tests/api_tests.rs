@@ -371,6 +371,62 @@ async fn test_create_marker_empty_icon_id() {
     assert!(body.contains("icon_id is required"));
 }
 
+#[tokio::test]
+async fn test_create_marker_unknown_icon_id() {
+    let app = create_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/markers")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "uuid": "550e8400-e29b-41d4-a716-446655440000",
+                        "lat": 59.91,
+                        "lon": 10.75,
+                        "icon_id": "unknown_icon"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = body_string(response.into_body()).await;
+    assert!(body.contains("not found"));
+}
+
+#[tokio::test]
+async fn test_create_marker_unknown_field_rejected() {
+    let app = create_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/markers")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "uuid": "550e8400-e29b-41d4-a716-446655440000",
+                        "lat": 59.91,
+                        "lon": 10.75,
+                        "icon_id": "marker",
+                        "unknown_field": "value"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 // ============================================================================
 // Log endpoint tests
 // ============================================================================
@@ -513,6 +569,110 @@ async fn test_get_log_pagination() {
     assert_eq!(json["entries"].as_array().unwrap().len(), 1);
     assert_eq!(json["has_more"], false);
     assert_eq!(json["max_id"], 3);
+}
+
+// ============================================================================
+// Timestamp format tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_marker_has_epoch_ms_timestamp() {
+    let app = create_test_app().await;
+
+    // Create a marker
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/markers")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "uuid": "550e8400-e29b-41d4-a716-446655440000",
+                        "lat": 59.91,
+                        "lon": 10.75,
+                        "icon_id": "marker"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Get markers and verify timestamp format
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/markers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = body_string(response.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // Verify server_time_ms is a number (epoch milliseconds)
+    assert!(json["server_time_ms"].is_i64());
+    let server_time = json["server_time_ms"].as_i64().unwrap();
+    assert!(server_time > 1700000000000); // After Nov 2023
+
+    // Verify marker has ts_epoch_ms (not ts string)
+    let marker = &json["markers"][0];
+    assert!(marker["ts_epoch_ms"].is_i64());
+    let ts = marker["ts_epoch_ms"].as_i64().unwrap();
+    assert!(ts > 1700000000000); // After Nov 2023
+}
+
+#[tokio::test]
+async fn test_log_has_epoch_ms_timestamp() {
+    let app = create_test_app().await;
+
+    // Create a marker
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/markers")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "uuid": "550e8400-e29b-41d4-a716-446655440000",
+                        "lat": 59.91,
+                        "lon": 10.75,
+                        "icon_id": "marker"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Get log and verify timestamp format
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/log")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = body_string(response.into_body()).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // Verify server_time_ms is a number (epoch milliseconds)
+    assert!(json["server_time_ms"].is_i64());
+    let server_time = json["server_time_ms"].as_i64().unwrap();
+    assert!(server_time > 1700000000000); // After Nov 2023
+
+    // Verify entry has ts_epoch_ms
+    let entry = &json["entries"][0];
+    assert!(entry["ts_epoch_ms"].is_i64());
 }
 
 // ============================================================================

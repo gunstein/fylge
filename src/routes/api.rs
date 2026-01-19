@@ -7,30 +7,20 @@ use axum::{
 
 use crate::db;
 use crate::models::{
-    GetIconsResponse, GetLogResponse, GetMarkersAtResponse, GetMarkersResponse, Icon, LogQuery,
-    MarkersAtQuery,
+    ApiError, GetIconsResponse, GetLogResponse, GetMarkersAtResponse, GetMarkersResponse, Icon,
+    LogQuery, MarkersAtQuery,
 };
 use crate::state::AppState;
 
 /// GET /api/markers - Get markers from the last 24 hours.
 pub async fn get_markers(State(state): State<AppState>) -> Response {
-    let server_time = match db::get_server_time(&state.pool).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to get server time: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let server_time_ms = db::get_server_time_ms();
 
     match db::get_markers_last_24h(&state.pool).await {
         Ok((markers, max_id)) => {
             let response = GetMarkersResponse {
                 window_hours: 24,
-                server_time,
+                server_time_ms,
                 max_id,
                 markers,
             };
@@ -40,22 +30,31 @@ pub async fn get_markers(State(state): State<AppState>) -> Response {
             tracing::error!("Failed to get markers: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                Json(ApiError::new(format!("Database error: {}", e))),
             )
                 .into_response()
         }
     }
 }
 
-/// GET /api/markers_at?at=<ISO timestamp> - Get markers visible at a specific time.
+/// GET /api/markers_at?at=<epoch_ms> - Get markers visible at a specific time.
 pub async fn get_markers_at(
     State(state): State<AppState>,
     Query(query): Query<MarkersAtQuery>,
 ) -> Response {
-    match db::get_markers_at(&state.pool, &query.at).await {
+    // Validate query parameters
+    if let Err(e) = query.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::from_validation_error(&e)),
+        )
+            .into_response();
+    }
+
+    match db::get_markers_at(&state.pool, query.at).await {
         Ok(markers) => {
             let response = GetMarkersAtResponse {
-                at: query.at,
+                at_epoch_ms: query.at,
                 window_hours: 24,
                 markers,
             };
@@ -65,7 +64,7 @@ pub async fn get_markers_at(
             tracing::error!("Failed to get markers at time: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                Json(ApiError::new(format!("Database error: {}", e))),
             )
                 .into_response()
         }
@@ -74,24 +73,23 @@ pub async fn get_markers_at(
 
 /// GET /api/log?after_id=...&limit=... - Get log entries for polling/sync.
 pub async fn get_log(State(state): State<AppState>, Query(query): Query<LogQuery>) -> Response {
-    let server_time = match db::get_server_time(&state.pool).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to get server time: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-                .into_response();
-        }
-    };
+    // Validate query parameters
+    if let Err(e) = query.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::from_validation_error(&e)),
+        )
+            .into_response();
+    }
+
+    let server_time_ms = db::get_server_time_ms();
 
     match db::get_log_after(&state.pool, query.after_id, query.limit).await {
         Ok((entries, max_id, has_more)) => {
             let response = GetLogResponse {
                 after_id: query.after_id,
                 limit: query.limit,
-                server_time,
+                server_time_ms,
                 max_id,
                 has_more,
                 entries,
@@ -102,7 +100,7 @@ pub async fn get_log(State(state): State<AppState>, Query(query): Query<LogQuery
             tracing::error!("Failed to get log: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                Json(ApiError::new(format!("Database error: {}", e))),
             )
                 .into_response()
         }
@@ -112,7 +110,7 @@ pub async fn get_log(State(state): State<AppState>, Query(query): Query<LogQuery
 /// GET /api/icons - Get available icons.
 pub async fn get_icons(State(state): State<AppState>) -> Json<GetIconsResponse> {
     Json(GetIconsResponse {
-        icons: state.icons.clone(),
+        icons: (*state.icons).clone(),
     })
 }
 
