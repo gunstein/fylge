@@ -1,22 +1,23 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from "vite";
 
 export default defineConfig({
-  root: '.',
+  root: ".",
+  base: "/static/dist/",
   build: {
-    outDir: '../static/dist',
+    outDir: "../static/dist",
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        main: './index.html',
+        main: "./index.html",
       },
     },
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:3000',
-      '/markers': 'http://localhost:3000',
-      '/health': 'http://localhost:3000',
-      '/static/icons': 'http://localhost:3000',
+      "/api": "http://localhost:3000",
+      "/markers": "http://localhost:3000",
+      "/health": "http://localhost:3000",
+      "/static/icons": "http://localhost:3000",
     },
   },
 });

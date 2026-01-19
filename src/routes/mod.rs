@@ -26,7 +26,7 @@ pub fn create_router(state: AppState) -> Router {
 }
 
 async fn index() -> impl IntoResponse {
-    Html(include_str!("../../static/index.html"))
+    Html(include_str!("../../static/dist/index.html"))
 }
 
 async fn health() -> &'static str {
