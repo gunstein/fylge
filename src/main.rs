@@ -8,6 +8,7 @@ mod routes;
 mod state;
 
 use config::Config;
+use routes::api::load_icons;
 use state::AppState;
 
 #[tokio::main]
@@ -22,7 +23,7 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Configuration error: {}", e);
-            eprintln!("Optional: DATABASE_URL (default: sqlite:fylge.db)");
+            eprintln!("Optional: DATABASE_URL (default: sqlite://fylge.db)");
             eprintln!("Optional: LISTEN_ADDR (default: 0.0.0.0:3000)");
             std::process::exit(1);
         }
@@ -48,8 +49,12 @@ async fn main() {
     }
     tracing::info!("Database migrations completed");
 
+    // Load icons
+    let icons = load_icons();
+    tracing::info!("Loaded {} icons", icons.len());
+
     // Create app state
-    let state = AppState::new(pool);
+    let state = AppState::new(pool, icons);
 
     // Build router
     let app = routes::create_router(state).nest_service("/static", ServeDir::new("static"));

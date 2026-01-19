@@ -3,7 +3,7 @@ pub mod markers;
 
 use axum::{
     response::{Html, IntoResponse},
-    routing::{delete, get, post, put},
+    routing::{get, post},
     Router,
 };
 
@@ -13,13 +13,12 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         // Index page
         .route("/", get(index))
-        // Marker CRUD
+        // Marker creation (append-only, no update/delete)
         .route("/markers", post(markers::create_marker))
-        .route("/markers/{uuid}", put(markers::update_marker))
-        .route("/markers/{uuid}", delete(markers::delete_marker))
         // API endpoints
-        .route("/api/log", get(api::get_log))
         .route("/api/markers", get(api::get_markers))
+        .route("/api/markers_at", get(api::get_markers_at))
+        .route("/api/log", get(api::get_log))
         .route("/api/icons", get(api::get_icons))
         // Health check
         .route("/health", get(health))

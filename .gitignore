@@ -15,3 +15,13 @@ Thumbs.db
 
 # Environment
 .env
+
+# Frontend build artifacts
+/frontend/node_modules/
+/frontend/dist/
+/static/dist/
+
+# Database
+*.db
+*.db-shm
+*.db-wal

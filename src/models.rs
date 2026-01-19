@@ -1,84 +1,62 @@
 use serde::{Deserialize, Serialize};
 
-/// Operation type for marker log entries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Operation {
-    Insert,
-    Update,
-    Delete,
-}
-
-// Custom FromRow implementation for Operation from TEXT
-impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for Operation {
-    fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-        let text = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
-        match text {
-            "insert" => Ok(Operation::Insert),
-            "update" => Ok(Operation::Update),
-            "delete" => Ok(Operation::Delete),
-            _ => Err(format!("Unknown operation: {}", text).into()),
-        }
-    }
-}
-
-impl sqlx::Type<sqlx::Sqlite> for Operation {
-    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
-        <&str as sqlx::Type<sqlx::Sqlite>>::type_info()
-    }
-}
-
-/// A single entry in the marker log (append-only).
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct LogEntry {
-    pub id: i64,
-    pub globe_id: String,
-    pub uuid: String, // UUID stored as TEXT in SQLite
-    pub operation: Operation,
-    pub ts: String, // Timestamp stored as TEXT in SQLite
-    pub lat: Option<f64>,
-    pub lon: Option<f64>,
-    pub icon_id: Option<String>,
-    pub label: Option<String>,
-}
-
-/// Current state of a marker (computed from log).
+/// A marker in the log (append-only).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Marker {
-    pub uuid: String, // UUID stored as TEXT in SQLite
+    pub id: i64,
+    pub uuid: String,
+    pub ts: String,
     pub lat: f64,
     pub lon: f64,
     pub icon_id: String,
     pub label: Option<String>,
-    pub updated_at: String, // Timestamp stored as TEXT in SQLite
 }
 
 /// Request to create a new marker.
 #[derive(Debug, Deserialize)]
 pub struct CreateMarkerRequest {
-    pub uuid: Option<String>,
-    pub globe_id: Option<String>,
+    pub uuid: String,
     pub lat: f64,
     pub lon: f64,
     pub icon_id: String,
     pub label: Option<String>,
 }
 
-/// Request to update an existing marker.
+/// Response for creating a marker.
+#[derive(Debug, Serialize)]
+pub struct CreateMarkerResponse {
+    pub status: &'static str, // "created" or "exists"
+    pub marker: Marker,
+}
+
+/// Response for getting markers (last 24h).
+#[derive(Debug, Serialize)]
+pub struct GetMarkersResponse {
+    pub window_hours: u32,
+    pub server_time: String,
+    pub max_id: i64,
+    pub markers: Vec<Marker>,
+}
+
+/// Response for getting markers at a specific time.
+#[derive(Debug, Serialize)]
+pub struct GetMarkersAtResponse {
+    pub at: String,
+    pub window_hours: u32,
+    pub markers: Vec<Marker>,
+}
+
+/// Query parameters for markers_at endpoint.
 #[derive(Debug, Deserialize)]
-pub struct UpdateMarkerRequest {
-    pub globe_id: Option<String>,
-    pub lat: Option<f64>,
-    pub lon: Option<f64>,
-    pub icon_id: Option<String>,
-    pub label: Option<String>,
+pub struct MarkersAtQuery {
+    pub at: String,
 }
 
 /// Query parameters for log endpoint.
 #[derive(Debug, Deserialize)]
 pub struct LogQuery {
-    pub globe_id: Option<String>,
-    pub after_id: Option<i64>,
+    #[serde(default)]
+    pub after_id: i64,
     #[serde(default = "default_limit")]
     pub limit: i64,
 }
@@ -87,8 +65,27 @@ fn default_limit() -> i64 {
     100
 }
 
-/// Query parameters for markers endpoint.
-#[derive(Debug, Deserialize)]
-pub struct MarkersQuery {
-    pub globe_id: Option<String>,
+/// Response for log endpoint.
+#[derive(Debug, Serialize)]
+pub struct GetLogResponse {
+    pub after_id: i64,
+    pub limit: i64,
+    pub server_time: String,
+    pub max_id: i64,
+    pub has_more: bool,
+    pub entries: Vec<Marker>,
+}
+
+/// Icon metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Icon {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+}
+
+/// Response for icons endpoint.
+#[derive(Debug, Serialize)]
+pub struct GetIconsResponse {
+    pub icons: Vec<Icon>,
 }

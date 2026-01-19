@@ -9,10 +9,10 @@ pub struct Config {
 
 impl Config {
     /// Load configuration from environment variables.
-    /// If DATABASE_URL is not set, defaults to "sqlite:fylge.db"
+    /// DATABASE_URL defaults to "sqlite://fylge.db"
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url =
-            std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:fylge.db".to_string());
+            std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://fylge.db".to_string());
 
         let listen_addr = std::env::var("LISTEN_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())

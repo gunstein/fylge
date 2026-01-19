@@ -2,12 +2,15 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::str::FromStr;
 
-use crate::models::{LogEntry, Marker};
-use uuid::Uuid;
+use crate::models::Marker;
 
-/// Initialize database connection pool.
+/// Initialize database connection pool with recommended pragmas.
 pub async fn init_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
-    let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
+    let options = SqliteConnectOptions::from_str(database_url)?
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal);
 
     SqlitePoolOptions::new()
         .max_connections(10)
@@ -23,25 +26,25 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Insert a new marker (operation = insert).
+/// Insert a new marker. Returns the marker if created, or existing marker if uuid already exists.
+/// Returns (marker, created) where created is true if this was a new insert.
 pub async fn insert_marker(
     pool: &SqlitePool,
-    globe_id: &str,
-    uuid: Uuid,
+    uuid: &str,
     lat: f64,
     lon: f64,
     icon_id: &str,
     label: Option<&str>,
-) -> Result<i64, sqlx::Error> {
-    let uuid_str = uuid.to_string();
+) -> Result<(Marker, bool), sqlx::Error> {
+    // Try to insert
     let result = sqlx::query(
         r#"
-        INSERT INTO marker_log (globe_id, uuid, operation, lat, lon, icon_id, label)
-        VALUES (?, ?, 'insert', ?, ?, ?, ?)
+        INSERT INTO marker_log (uuid, lat, lon, icon_id, label)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(uuid) DO NOTHING
         "#,
     )
-    .bind(globe_id)
-    .bind(&uuid_str)
+    .bind(uuid)
     .bind(lat)
     .bind(lon)
     .bind(icon_id)
@@ -49,157 +52,91 @@ pub async fn insert_marker(
     .execute(pool)
     .await?;
 
-    Ok(result.last_insert_rowid())
-}
+    let created = result.rows_affected() > 0;
 
-/// Update an existing marker (operation = update).
-pub async fn update_marker(
-    pool: &SqlitePool,
-    globe_id: &str,
-    uuid: Uuid,
-    lat: Option<f64>,
-    lon: Option<f64>,
-    icon_id: Option<&str>,
-    label: Option<&str>,
-) -> Result<i64, sqlx::Error> {
-    let uuid_str = uuid.to_string();
-    let result = sqlx::query(
-        r#"
-        INSERT INTO marker_log (globe_id, uuid, operation, lat, lon, icon_id, label)
-        VALUES (?, ?, 'update', ?, ?, ?, ?)
-        "#,
+    // Fetch the marker (either just created or existing)
+    let marker = sqlx::query_as::<_, Marker>(
+        "SELECT id, uuid, ts, lat, lon, icon_id, label FROM marker_log WHERE uuid = ?",
     )
-    .bind(globe_id)
-    .bind(&uuid_str)
-    .bind(lat)
-    .bind(lon)
-    .bind(icon_id)
-    .bind(label)
-    .execute(pool)
+    .bind(uuid)
+    .fetch_one(pool)
     .await?;
 
-    Ok(result.last_insert_rowid())
+    Ok((marker, created))
 }
 
-/// Delete a marker (operation = delete).
-pub async fn delete_marker(
-    pool: &SqlitePool,
-    globe_id: &str,
-    uuid: Uuid,
-) -> Result<i64, sqlx::Error> {
-    let uuid_str = uuid.to_string();
-    let result = sqlx::query(
+/// Get markers from the last 24 hours.
+pub async fn get_markers_last_24h(pool: &SqlitePool) -> Result<(Vec<Marker>, i64), sqlx::Error> {
+    let markers = sqlx::query_as::<_, Marker>(
         r#"
-        INSERT INTO marker_log (globe_id, uuid, operation)
-        VALUES (?, ?, 'delete')
-        "#,
-    )
-    .bind(globe_id)
-    .bind(&uuid_str)
-    .execute(pool)
-    .await?;
-
-    Ok(result.last_insert_rowid())
-}
-
-/// Get log entries after a given id.
-pub async fn get_log(
-    pool: &SqlitePool,
-    globe_id: &str,
-    after_id: i64,
-    limit: i64,
-) -> Result<Vec<LogEntry>, sqlx::Error> {
-    let entries = sqlx::query_as::<_, LogEntry>(
-        r#"
-        SELECT id, globe_id, uuid, operation, ts, lat, lon, icon_id, label
+        SELECT id, uuid, ts, lat, lon, icon_id, label
         FROM marker_log
-        WHERE globe_id = ? AND id > ?
-        ORDER BY id
-        LIMIT ?
+        WHERE ts >= datetime('now', '-24 hours')
+        ORDER BY ts ASC
         "#,
     )
-    .bind(globe_id)
-    .bind(after_id)
-    .bind(limit)
     .fetch_all(pool)
     .await?;
 
-    Ok(entries)
+    // Get max_id
+    let max_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM marker_log")
+        .fetch_one(pool)
+        .await?;
+
+    Ok((markers, max_id))
 }
 
-/// Get current state of all markers (latest non-deleted state per uuid).
-/// Materializes state by applying all log entries in order.
-pub async fn get_markers(pool: &SqlitePool, globe_id: &str) -> Result<Vec<Marker>, sqlx::Error> {
-    // To handle partial updates, we need to materialize state by applying all events.
-    // This query uses window functions to carry forward non-null values.
+/// Get markers visible at a specific point in time (24h window ending at that time).
+pub async fn get_markers_at(pool: &SqlitePool, at: &str) -> Result<Vec<Marker>, sqlx::Error> {
     let markers = sqlx::query_as::<_, Marker>(
         r#"
-        WITH ordered_log AS (
-            SELECT
-                uuid,
-                operation,
-                lat,
-                lon,
-                icon_id,
-                label,
-                ts,
-                ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY id DESC) as rn
-            FROM marker_log
-            WHERE globe_id = ?
-        ),
-        latest AS (
-            SELECT uuid, operation, ts
-            FROM ordered_log
-            WHERE rn = 1
-        ),
-        materialized AS (
-            SELECT
-                l.uuid,
-                (SELECT ol.lat FROM ordered_log ol WHERE ol.uuid = l.uuid AND ol.lat IS NOT NULL ORDER BY ol.rn LIMIT 1) as lat,
-                (SELECT ol.lon FROM ordered_log ol WHERE ol.uuid = l.uuid AND ol.lon IS NOT NULL ORDER BY ol.rn LIMIT 1) as lon,
-                (SELECT ol.icon_id FROM ordered_log ol WHERE ol.uuid = l.uuid AND ol.icon_id IS NOT NULL ORDER BY ol.rn LIMIT 1) as icon_id,
-                (SELECT ol.label FROM ordered_log ol WHERE ol.uuid = l.uuid AND ol.label IS NOT NULL ORDER BY ol.rn LIMIT 1) as label,
-                l.ts as updated_at
-            FROM latest l
-            WHERE l.operation != 'delete'
-        )
-        SELECT uuid, lat, lon, icon_id, label, updated_at
-        FROM materialized
-        WHERE lat IS NOT NULL AND lon IS NOT NULL AND icon_id IS NOT NULL
+        SELECT id, uuid, ts, lat, lon, icon_id, label
+        FROM marker_log
+        WHERE ts <= ?
+          AND ts >= datetime(?, '-24 hours')
+        ORDER BY ts ASC
         "#,
     )
-    .bind(globe_id)
+    .bind(at)
+    .bind(at)
     .fetch_all(pool)
     .await?;
 
     Ok(markers)
 }
 
-/// Check if a marker exists (has non-deleted state).
-pub async fn marker_exists(
+/// Get log entries after a given id (for polling/sync).
+pub async fn get_log_after(
     pool: &SqlitePool,
-    globe_id: &str,
-    uuid: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let uuid_str = uuid.to_string();
-    let row: (i32,) = sqlx::query_as(
+    after_id: i64,
+    limit: i64,
+) -> Result<(Vec<Marker>, i64, bool), sqlx::Error> {
+    let entries = sqlx::query_as::<_, Marker>(
         r#"
-        SELECT COUNT(*) FROM (
-            SELECT m.operation
-            FROM marker_log m
-            INNER JOIN (
-                SELECT MAX(id) as max_id
-                FROM marker_log
-                WHERE globe_id = ? AND uuid = ?
-            ) latest ON m.id = latest.max_id
-            WHERE m.operation != 'delete'
-        )
+        SELECT id, uuid, ts, lat, lon, icon_id, label
+        FROM marker_log
+        WHERE id > ?
+        ORDER BY id ASC
+        LIMIT ?
         "#,
     )
-    .bind(globe_id)
-    .bind(&uuid_str)
-    .fetch_one(pool)
+    .bind(after_id)
+    .bind(limit + 1) // Fetch one extra to check if there's more
+    .fetch_all(pool)
     .await?;
 
-    Ok(row.0 > 0)
+    let has_more = entries.len() > limit as usize;
+    let entries: Vec<Marker> = entries.into_iter().take(limit as usize).collect();
+
+    let max_id = entries.last().map(|m| m.id).unwrap_or(after_id);
+
+    Ok((entries, max_id, has_more))
+}
+
+/// Get current server time in ISO format.
+pub async fn get_server_time(pool: &SqlitePool) -> Result<String, sqlx::Error> {
+    let time: String = sqlx::query_scalar("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
+        .fetch_one(pool)
+        .await?;
+    Ok(time)
 }

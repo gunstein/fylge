@@ -1,18 +1,19 @@
--- Marker log table (append-only)
+-- Marker log table (append-only, no updates/deletes)
 CREATE TABLE IF NOT EXISTS marker_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    globe_id TEXT NOT NULL DEFAULT 'default',
     uuid TEXT NOT NULL,
-    operation TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete')),
-    ts TEXT NOT NULL DEFAULT (datetime('now')),
-    lat REAL,
-    lon REAL,
-    icon_id TEXT,
+    ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    icon_id TEXT NOT NULL,
     label TEXT
 );
 
--- Index for efficient paging/sync queries
-CREATE INDEX IF NOT EXISTS idx_marker_log_globe_id ON marker_log (globe_id, id);
+-- Idempotency: same UUID cannot be inserted twice
+CREATE UNIQUE INDEX IF NOT EXISTS ux_marker_log_uuid ON marker_log(uuid);
 
--- Index for finding latest state per uuid
-CREATE INDEX IF NOT EXISTS idx_marker_log_uuid ON marker_log (globe_id, uuid, id DESC);
+-- Efficient fetching of last 24 hours
+CREATE INDEX IF NOT EXISTS ix_marker_log_ts ON marker_log(ts);
+
+-- Efficient paging/sync with after_id
+CREATE INDEX IF NOT EXISTS ix_marker_log_id ON marker_log(id);
