@@ -140,3 +140,239 @@ pub async fn get_server_time(pool: &SqlitePool) -> Result<String, sqlx::Error> {
         .await?;
     Ok(time)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a test database with in-memory SQLite.
+    async fn setup_test_db() -> SqlitePool {
+        let pool = init_pool("sqlite::memory:").await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_insert_marker() {
+        let pool = setup_test_db().await;
+
+        let (marker, created) = insert_marker(
+            &pool,
+            "550e8400-e29b-41d4-a716-446655440000",
+            59.91,
+            10.75,
+            "marker",
+            Some("Oslo"),
+        )
+        .await
+        .unwrap();
+
+        assert!(created);
+        assert_eq!(marker.uuid, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(marker.lat, 59.91);
+        assert_eq!(marker.lon, 10.75);
+        assert_eq!(marker.icon_id, "marker");
+        assert_eq!(marker.label, Some("Oslo".to_string()));
+        assert_eq!(marker.id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_insert_marker_without_label() {
+        let pool = setup_test_db().await;
+
+        let (marker, created) = insert_marker(
+            &pool,
+            "550e8400-e29b-41d4-a716-446655440000",
+            59.91,
+            10.75,
+            "marker",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(created);
+        assert_eq!(marker.label, None);
+    }
+
+    #[tokio::test]
+    async fn test_insert_marker_idempotent() {
+        let pool = setup_test_db().await;
+
+        // First insert
+        let (marker1, created1) = insert_marker(
+            &pool,
+            "550e8400-e29b-41d4-a716-446655440000",
+            59.91,
+            10.75,
+            "marker",
+            Some("Oslo"),
+        )
+        .await
+        .unwrap();
+
+        assert!(created1);
+
+        // Second insert with same UUID
+        let (marker2, created2) = insert_marker(
+            &pool,
+            "550e8400-e29b-41d4-a716-446655440000",
+            60.0, // Different lat
+            11.0, // Different lon
+            "ship",
+            Some("Bergen"),
+        )
+        .await
+        .unwrap();
+
+        assert!(!created2); // Should not be created
+        assert_eq!(marker2.id, marker1.id); // Same marker
+        assert_eq!(marker2.lat, 59.91); // Original values preserved
+        assert_eq!(marker2.icon_id, "marker");
+    }
+
+    #[tokio::test]
+    async fn test_get_markers_last_24h_empty() {
+        let pool = setup_test_db().await;
+
+        let (markers, max_id) = get_markers_last_24h(&pool).await.unwrap();
+
+        assert!(markers.is_empty());
+        assert_eq!(max_id, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_markers_last_24h() {
+        let pool = setup_test_db().await;
+
+        // Insert two markers
+        insert_marker(&pool, "uuid-1", 59.91, 10.75, "marker", Some("Oslo"))
+            .await
+            .unwrap();
+        insert_marker(&pool, "uuid-2", 60.39, 5.32, "ship", Some("Bergen"))
+            .await
+            .unwrap();
+
+        let (markers, max_id) = get_markers_last_24h(&pool).await.unwrap();
+
+        assert_eq!(markers.len(), 2);
+        assert_eq!(max_id, 2);
+        assert_eq!(markers[0].uuid, "uuid-1");
+        assert_eq!(markers[1].uuid, "uuid-2");
+    }
+
+    #[tokio::test]
+    async fn test_get_log_after_empty() {
+        let pool = setup_test_db().await;
+
+        let (entries, max_id, has_more) = get_log_after(&pool, 0, 100).await.unwrap();
+
+        assert!(entries.is_empty());
+        assert_eq!(max_id, 0);
+        assert!(!has_more);
+    }
+
+    #[tokio::test]
+    async fn test_get_log_after() {
+        let pool = setup_test_db().await;
+
+        // Insert three markers
+        insert_marker(&pool, "uuid-1", 59.91, 10.75, "marker", None)
+            .await
+            .unwrap();
+        insert_marker(&pool, "uuid-2", 60.39, 5.32, "ship", None)
+            .await
+            .unwrap();
+        insert_marker(&pool, "uuid-3", 63.43, 10.39, "plane", None)
+            .await
+            .unwrap();
+
+        // Get all entries after id 0
+        let (entries, max_id, has_more) = get_log_after(&pool, 0, 100).await.unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(max_id, 3);
+        assert!(!has_more);
+
+        // Get entries after id 1
+        let (entries, max_id, has_more) = get_log_after(&pool, 1, 100).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].uuid, "uuid-2");
+        assert_eq!(entries[1].uuid, "uuid-3");
+        assert_eq!(max_id, 3);
+        assert!(!has_more);
+
+        // Get entries after id 3 (none)
+        let (entries, max_id, has_more) = get_log_after(&pool, 3, 100).await.unwrap();
+        assert!(entries.is_empty());
+        assert_eq!(max_id, 3);
+        assert!(!has_more);
+    }
+
+    #[tokio::test]
+    async fn test_get_log_after_with_limit() {
+        let pool = setup_test_db().await;
+
+        // Insert five markers
+        for i in 1..=5 {
+            insert_marker(
+                &pool,
+                &format!("uuid-{}", i),
+                59.0 + i as f64,
+                10.0,
+                "marker",
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Get with limit 2
+        let (entries, max_id, has_more) = get_log_after(&pool, 0, 2).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(max_id, 2);
+        assert!(has_more);
+
+        // Get next page
+        let (entries, max_id, has_more) = get_log_after(&pool, 2, 2).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(max_id, 4);
+        assert!(has_more);
+
+        // Get last page
+        let (entries, max_id, has_more) = get_log_after(&pool, 4, 2).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(max_id, 5);
+        assert!(!has_more);
+    }
+
+    #[tokio::test]
+    async fn test_get_server_time() {
+        let pool = setup_test_db().await;
+
+        let time = get_server_time(&pool).await.unwrap();
+
+        // Should be in ISO format
+        assert!(time.contains("T"));
+        assert!(time.ends_with("Z"));
+        // Should be parseable
+        assert!(time.len() > 20);
+    }
+
+    #[tokio::test]
+    async fn test_get_markers_at() {
+        let pool = setup_test_db().await;
+
+        // Insert a marker
+        insert_marker(&pool, "uuid-1", 59.91, 10.75, "marker", Some("Oslo"))
+            .await
+            .unwrap();
+
+        // Get current server time
+        let now = get_server_time(&pool).await.unwrap();
+
+        // Get markers at current time (should include the marker)
+        let markers = get_markers_at(&pool, &now).await.unwrap();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].uuid, "uuid-1");
+    }
+}

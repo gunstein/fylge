@@ -1,15 +1,7 @@
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod config;
-mod db;
-mod models;
-mod routes;
-mod state;
-
-use config::Config;
-use routes::api::load_icons;
-use state::AppState;
+use fylge::{create_router, init_pool, load_icons, run_migrations, AppState, Config};
 
 #[tokio::main]
 async fn main() {
@@ -34,7 +26,7 @@ async fn main() {
     tracing::info!("Database: {}", config.database_url);
 
     // Connect to database
-    let pool = match db::init_pool(&config.database_url).await {
+    let pool = match init_pool(&config.database_url).await {
         Ok(pool) => pool,
         Err(e) => {
             eprintln!("Database connection error: {}", e);
@@ -43,7 +35,7 @@ async fn main() {
     };
 
     // Run migrations
-    if let Err(e) = db::run_migrations(&pool).await {
+    if let Err(e) = run_migrations(&pool).await {
         eprintln!("Migration error: {}", e);
         std::process::exit(1);
     }
@@ -57,7 +49,7 @@ async fn main() {
     let state = AppState::new(pool, icons);
 
     // Build router
-    let app = routes::create_router(state).nest_service("/static", ServeDir::new("static"));
+    let app = create_router(state).nest_service("/static", ServeDir::new("static"));
 
     // Start server
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
